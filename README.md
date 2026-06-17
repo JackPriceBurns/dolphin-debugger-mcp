@@ -152,4 +152,12 @@ running on the last-written value. `size` is the write width in bytes
   the in-game action during that window. On timeout it force-halts and says so.
 - Watchpoints are hardware-backed and historically rough on some builds — if a
   watch never fires, fall back to an execution `set_breakpoint`.
-</content>
+
+## License
+
+Copyright © 2026 Jack Price-Burns.
+
+Released under the **GNU Affero General Public License v3.0** — see [LICENSE](LICENSE).
+It's strong copyleft: if you use, modify, or run this (including offering it as a
+network service), you must make your full corresponding source available under
+the same license.
