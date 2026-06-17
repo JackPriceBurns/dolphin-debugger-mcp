@@ -10,7 +10,7 @@ Built for [SFA-Decomp](https://github.com/zcanann/SFA-Decomp), a *matching*
 decompilation of Star Fox Adventures: because the build byte-matches retail, the
 addresses in the symbol map are the live RAM addresses while the game runs, so a
 halted PC or an `r3` pointer resolves straight back to `unit/file.c::Function +0xNN`.
-There's a write-up of how it came together [here](https://jackpriceburns.com/blog/dolphin-debugger-mcp).
+There's a write-up of how it came together [here](https://jpb.dev/blog/dolphin-debugger-mcp).
 
 ## 1. Enable the stub in Dolphin
 
