@@ -22,6 +22,7 @@ import os
 import struct
 import sys
 import threading
+import time
 import traceback
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -273,6 +274,94 @@ class Debugger:
         return {"ok": True, "was_running": running,
                 "note": "loop stopped; the game is left running on the last-written value."}
 
+    def trace_breakpoint(self, target: str, timeout: float = 6.0,
+                         max_distinct: int = 80, regs: list | None = None,
+                         max_raw: int = 20000) -> dict:
+        """Auto-continue trace: set an exec breakpoint and log DISTINCT hits.
+
+        Loops continue -> capture -> continue while you drive the game, so you
+        can see what a hot function (e.g. GameBit_Set) is called with without
+        hand-continuing each hit. Hits are deduped GLOBALLY by (captured regs,
+        caller): each distinct (args, caller) is one row with a running count,
+        in first-seen order -- so per-frame housekeeping spam collapses to a
+        few rows and a NEW event stands out as a new row.
+
+        Stops after `timeout` seconds pass with NO new distinct hit (you stopped
+        triggering things). Steady per-frame spam keeps the loop alive but does
+        NOT keep it from ending -- only a genuinely new (args, caller) resets the
+        idle timer. Safety caps: `max_distinct` rows, `max_raw` total hits.
+
+        `regs` = registers to capture per hit (default ["r3", "r4"], the first
+        two args); each row also records caller (LR) + stopped PC, resolved.
+        Leaves the game FREE-RUNNING at the end (removes a breakpoint it added),
+        so it never leaves you stuck halted.
+        """
+        self.ensure_connected()
+        a = self.syms.resolve_target(target)
+        capture = [r.lower() for r in (regs or ["r3", "r4"])]
+        for r in capture:
+            if r not in REGS:
+                raise RSPError(f"unknown register {r!r} in regs; valid: r0-r31, "
+                               "f0-f31, pc, lr, ctr, cr, xer, msr, fpscr")
+        timeout = float(timeout)
+        max_distinct = int(max_distinct)
+        max_raw = int(max_raw)
+        cont_timeout = min(2.0, timeout)
+        pre_existing = a in self.breakpoints
+        if not pre_existing:
+            self.rsp.add_breakpoint(a, BP_EXEC, 4)
+            self.breakpoints[a] = (BP_EXEC, 4)
+        order: list[dict] = []      # entries in first-seen order
+        seen: dict = {}             # key -> entry
+        raw = 0
+        last_new = time.monotonic()
+        stop = "idle (no new distinct hit)"
+        try:
+            while True:
+                stopped, _reply = self.rsp.cont(timeout=cont_timeout)
+                now = time.monotonic()
+                if stopped:
+                    raw += 1
+                    vals = {r: f"{self.rsp.read_reg(r):#x}" for r in capture}
+                    caller = self.syms.resolve(self.rsp.read_reg("lr"))["label"]
+                    key = (tuple(vals[r] for r in capture), caller)
+                    ent = seen.get(key)
+                    if ent is None:
+                        at = self.syms.resolve(self.rsp.read_reg("pc"))["label"]
+                        ent = {"count": 0, **vals, "caller": caller, "at": at}
+                        seen[key] = ent
+                        order.append(ent)
+                        last_new = now
+                    ent["count"] += 1
+                if (now - last_new) >= timeout:
+                    break
+                if len(order) >= max_distinct:
+                    stop = "max_distinct reached"
+                    break
+                if raw >= max_raw:
+                    stop = "max_raw reached"
+                    break
+        finally:
+            if not pre_existing:
+                try:
+                    self.rsp.remove_breakpoint(a, BP_EXEC, 4)
+                    self.breakpoints.pop(a, None)
+                except RSPError:
+                    pass
+            try:
+                self.rsp.resume()
+            except RSPError:
+                pass
+        return {
+            "target": self.syms.resolve(a)["label"], "addr": f"{a:#010x}",
+            "raw_hits": raw, "distinct": len(order), "stopped_because": stop,
+            "captured_regs": capture, "hits": order,
+            "note": "deduped globally by (regs, caller), first-seen order; game "
+                    "left FREE-RUNNING ("
+                    + ("breakpoint removed)." if not pre_existing
+                       else "pre-existing bp left armed)."),
+        }
+
 
 # ---- MCP tool schema definitions ----------------------------------------
 def tool_defs():
@@ -311,6 +400,19 @@ def tool_defs():
           "size": {"type": "integer", "default": 1}, "period": {"type": "number", "default": 5},
           "cycles": {"type": "integer", "default": 0}}),
         ("stop_loop", "Stop the running toggle_loop (leaves the game running on the last value).", {}),
+        ("trace_breakpoint",
+         "Auto-continue trace of a hot breakpoint: set an exec bp at `target` and loop "
+         "continue->capture->continue while you drive the game. Hits are deduped GLOBALLY "
+         "by (captured regs, caller) -> one row per distinct (args, caller) with a running "
+         "count, first-seen order, so per-frame spam collapses and a NEW event stands out. "
+         "Stops after `timeout`s with no NEW distinct hit (steady spam keeps it alive but "
+         "doesn't end it); caps at `max_distinct` rows / `max_raw` hits. Leaves the game "
+         "FREE-RUNNING. Ideal for 'what is GameBit_Set called with as I walk around'.",
+         {"target": addr, "timeout": {"type": "number", "default": 6},
+          "max_distinct": {"type": "integer", "default": 80},
+          "regs": {"type": "array", "items": {"type": "string"},
+                   "description": "registers to capture per hit (default [\"r3\", \"r4\"])"},
+          "max_raw": {"type": "integer", "default": 20000}}),
     ]
 
 
@@ -319,7 +421,7 @@ REQUIRED = {
     "read_memory": ["addr"], "write_memory": ["addr", "hex_bytes"],
     "set_breakpoint": ["target"], "watch_memory": ["addr"],
     "clear_breakpoint": ["target"], "lookup": ["target"],
-    "toggle_loop": ["addr", "value_a"],
+    "toggle_loop": ["addr", "value_a"], "trace_breakpoint": ["target"],
 }
 
 # tool name -> Debugger method name (continue is a keyword)
@@ -333,6 +435,7 @@ DISPATCH = {
     "resume": "resume", "wait_stop": "wait_stop",
     "step": "step", "halt": "halt", "lookup": "lookup",
     "toggle_loop": "toggle_loop", "stop_loop": "stop_loop",
+    "trace_breakpoint": "trace_breakpoint",
 }
 
 

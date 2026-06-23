@@ -80,6 +80,7 @@ Optional env: `DOLPHIN_GDB_HOST` (default 127.0.0.1), `DOLPHIN_GDB_PORT` (2159),
 | `step` | Single-step one instruction |
 | `halt` | Break the running emulator |
 | `toggle_loop` / `stop_loop` | A/B a memory value visually on a timer (see below) |
+| `trace_breakpoint` | Auto-continue a hot breakpoint, logging distinct hits deduped by (regs, caller) with counts; stops after N idle seconds with no *new* hit; great for "what is GameBit_Set called with as I walk around" |
 | `lookup` | Symbol ↔ address resolution (no Dolphin needed) |
 
 Addresses accept hex (`0x801ee668`), decimal, or a **symbol name**.
